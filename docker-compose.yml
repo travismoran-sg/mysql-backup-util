@@ -1,0 +1,100 @@
+version: '2'
+services:
+  nginx:
+    image: vipparcel/vipparcel-website-nginx:latest-dockerhub
+    stdin_open: true
+    volumes:
+    - /data/vipparcel/var/www/vipparcel:/var/www/vipparcel:rw
+    - /data/vipparcel/var/docker/vipparcel/website/log/nginx:/var/log/nginx:rw
+    - /data/vipparcel/nginx/httptest.vipparcel.conf:/etc/nginx/conf.d/vipparcel.conf:ro
+    tty: true
+    links:
+    - php-fpm:php
+    labels:
+      io.rancher.container.pull_image: always
+  mysql-backup-util:
+    image: mysql-backup-util
+    environment:
+      BACKUP_PATH: /backups
+      DB_HOST: mysql
+      DB_NAME: vipparcel
+      DB_PASSWORD: root
+      DB_USER: root
+      S3_BUCKET: 's3://dbbackups-8h382hf722fjf2012n3yfh84t83ridjugfugii4g99/vipparcel_db/'
+    stdin_open: true
+    volumes:
+    - mysql_backups:/backups
+    links:
+    - mysql:mysql
+    labels:
+      cron.schedule: 0 * * * * *
+  mysql:
+    image: vipparcel/vipparcel-website-mysql:deployed_vipparcel
+    environment:
+      MYSQL_DATABASE: vipparcel
+      MYSQL_PASSWORD: vipparcel
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: vipparcel
+    volumes:
+    - /data/vipparcel/var/docker/vipparcel/website/mysql54/data:/var/lib/mysql
+    labels:
+      io.rancher.container.pull_image: always
+  php-fpm:
+    image: vipparcel/vipparcel-website-phpfpm:latest-dockerhub
+    environment:
+      APP_CONF_DB_HOST: mysql
+      APP_CONF_DB_NAME: vipparcel
+      APP_CONF_DB_PASSWORD: vipparcel
+      APP_CONF_DB_TYPE: mysql
+      APP_CONF_DB_USERNAME: vipparcel
+      APP_CONF_ELASTIC_HOST: elk
+      APP_CONF_ELASTIC_PORT: '9200'
+      APP_CONF_GEO_HOST: 165.227.215.76
+      APP_CONF_ORM_STAT_API_HOST: statistic
+      APP_CONF_ORM_STAT_API_PORT: '3000'
+      APP_CONF_PAYMENT_MODE: live
+      APP_CONF_PAYMENT_PAYFLOW_CLIENTID: AXXbBBCy4IKcAjSvgVWBzE7JXuaFrsnSGdQZexX9oseHxEgGQSznJ7ed80H0
+      APP_CONF_PAYMENT_PAYFLOW_SECRET: EMbL6xBIhDFUIxtJU943-lnrtHoszdxEEzYj7KTwK3ABimZMbxPjvs174oB9
+      APP_CONF_PAYMENT_PAYPAL_PASSWORD: nationwide2016
+      APP_CONF_PAYMENT_PAYPAL_USERNAME: vippacel
+      APP_CONF_RABBITMQ_HOST: rabbitmq
+      APP_CONF_RABBITMQ_LOGIN: develop
+      APP_CONF_RABBITMQ_PASSWORD: develop
+      APP_CONF_RABBITMQ_PORT: '5672'
+      APP_CONF_REDIS_HOST: redis
+      APP_CONF_STAMPS_LOGIN_HOST: stampslogin
+      APP_CONF_STAMPS_LOGIN_PORT: '3000'
+      APP_CONF_USER_LOCATIONS_HOST: locationmap
+      APP_CONF_USER_LOCATIONS_PORT: '3000'
+      APP_ENV: prod
+      PRINT_SERVICE_IMAGE_URL: http://165.227.215.76
+      PRINT_SERVICE_URL: http://printpostage:3000
+    volumes:
+    - /data/vipparcel/var/www/vipparcel:/var/www/vipparcel:rw
+    links:
+    - mysql:mysql
+    - redis:redis
+    labels:
+      io.rancher.container.pull_image: always
+  redis:
+    image: redis
+    labels:
+      io.rancher.container.pull_image: always
+  deploy:
+    image: vipparcel/vipparcel-website-deploy:latest-dockerhub
+    environment:
+      APP_CONF_DB_HOST: mysql
+      APP_CONF_DB_NAME: vipparcel
+      APP_CONF_DB_PASSWORD: vipparcel
+      APP_CONF_DB_USERNAME: vipparcel
+      REDIS_HOST: redis
+      VCS_BRANCH: develop
+    volumes:
+    - /data/vipparcel/var/www/vipparcel:/var/www/vipparcel:rw
+    - /data/vipparcel/var/docker/vipparcel/website/ssh:/root/.ssh:rw
+    links:
+    - mysql:mysql
+    - redis:redis
+    labels:
+      io.rancher.container.pull_image: always
+

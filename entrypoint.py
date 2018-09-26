@@ -29,13 +29,14 @@ DB_USER = os.environ.get("DB_USER", None)
 DB_PASSWORD = os.environ.get("DB_PASSWORD", None)
 DB_NAME = os.environ.get("DB_NAME", None)
 BACKUP_PATH = os.environ.get("BACKUP_PATH", None)
+S3_BUCKET = os.environ.get("S3_BUCKET", None)
 
 print DB_HOST
 print DB_USER
 print DB_PASSWORD
 print DB_NAME
 print BACKUP_PATH
-
+print S3_BUCKET
 # Getting current DateTime to create the separate backup folder like "20180817-123433".
 DATETIME = time.strftime('%Y%m%d-%H%M%S')
 
@@ -86,7 +87,7 @@ else:
    gzipcmd = "gzip " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql"
    os.system(gzipcmd)
 
-subprocess.Popen("s3cmd put " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql" 's3://dbbackups-8h382hf722fjf2012n3yfh84t83ridjugfugii4g99/vipparcel_db/' ) 
+subprocess.Popen("s3cmd put " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql" S3_BUCKET ) 
 
 print ("")
 print ("Backup script completed")
