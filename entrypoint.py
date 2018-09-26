@@ -86,7 +86,7 @@ else:
    gzipcmd = "gzip " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql"
    os.system(gzipcmd)
 
-subprocess.Popen("s3cmd put " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql" ) 
+subprocess.Popen("s3cmd put " + pipes.quote(BACKUP_PATH) + "/" + db + DATETIME + ".sql" 's3://dbbackups-8h382hf722fjf2012n3yfh84t83ridjugfugii4g99/vipparcel_db/' ) 
 
 print ("")
 print ("Backup script completed")
