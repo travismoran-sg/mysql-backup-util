@@ -1,0 +1,251 @@
+#!/bin/bash
+
+source /usr/local/bin/functions.sh
+
+if [[ -n "$DB_DUMP_DEBUG" ]]; then
+  set -x
+fi
+
+# get all variables from environment variables or files (e.g. VARIABLE_NAME_FILE)
+# (setting defaults happens here, too)
+file_env "DB_SERVER"
+file_env "DB_PORT"
+file_env "DB_USER"
+file_env "DB_PASS"
+file_env "DB_NAMES"
+
+file_env "DB_DUMP_FREQ" "1440"
+file_env "DB_DUMP_BEGIN" "+0"
+file_env "DB_DUMP_DEBUG"
+file_env "DB_DUMP_TARGET" "/backup"
+
+file_env "DB_RESTORE_TARGET"
+
+file_env "AWS_ENDPOINT_URL"
+file_env "AWS_ENDPOINT_OPT"
+file_env "AWS_ACCESS_KEY_ID"
+file_env "AWS_SECRET_ACCESS_KEY"
+file_env "AWS_DEFAULT_REGION"
+
+file_env "SMB_USER"
+file_env "SMB_PASS"
+
+if [[ -n "$DB_DUMP_DEBUG" ]]; then
+  set -x
+fi
+
+# login credentials
+if [ -n "${DB_USER}" ]; then
+  DBUSER="-u${DB_USER}"
+else
+  DBUSER=
+fi
+if [ -n "${DB_PASS}" ]; then
+  DBPASS="-p${DB_PASS}"
+else
+  DBPASS=
+fi
+
+# capture our var settings
+DUMPVARS=""
+for i in $(env | awk -F_ '/^MYSQLDUMP_/ {print $2}'); do
+  DUMPVARS="${DUMPVARS} --${i}"
+done
+
+
+# database server
+if [ -z "${DB_SERVER}" ]; then
+  echo "DB_SERVER variable is required. Exiting."
+  exit 1
+fi
+# database port
+if [ -z "${DB_PORT}" ]; then
+  echo "DB_PORT not provided, defaulting to 3306"
+  DB_PORT=3306
+fi
+
+
+# temporary dump dir
+TMPDIR=/tmp/backups
+TMPRESTORE=/tmp/restorefile
+
+# this is global, so has to be set outside
+declare -A uri
+
+
+
+if [[ -n "$DB_RESTORE_TARGET" ]]; then
+  # Execute additional scripts for pre backup restore processing. For example,
+  # uncompress a tarball that contains the tarballs for the sql dump and a
+  # wordpress installation.
+  if [ -d /scripts.d/pre-restore/ ]; then
+    for i in $(ls /scripts.d/pre-restore/*.sh); do
+      if [ -x $i ]; then
+        DB_RESTORE_TARGET=${DB_RESTORE_TARGET} DB_DUMP_DEBUG=${DB_DUMP_DEBUG} $i
+      fi
+    done
+  fi
+  uri_parser ${DB_RESTORE_TARGET}
+  if [[ "${uri[schema]}" == "file" ]]; then
+    cp $DB_RESTORE_TARGET $TMPRESTORE 2>/dev/null
+  elif [[ "${uri[schema]}" == "s3" ]]; then
+    aws s3 cp "$DB_RESTORE_TARGET" $TMPRESTORE
+  elif [[ "${uri[schema]}" == "smb" ]]; then
+    if [[ -n "$SMB_USER" ]]; then
+      UPASSARG="-U"
+      UPASS="${SMB_USER}%${SMB_PASS}"
+    elif [[ -n "${uri[user]}" ]]; then
+      UPASSARG="-U"
+      UPASS="${uri[user]}%${uri[password]}"
+    else
+      UPASSARG=
+      UPASS=
+    fi
+    if [[ -n "${uri[userdomain]}" ]]; then
+      UDOM="-W ${uri[userdomain]}"
+    else
+      UDOM=
+    fi
+    smbclient -N "//${uri[host]}/${uri[share]}" ${UPASSARG} "${UPASS}" ${UDOM} -c "get ${uri[sharepath]} ${TMPRESTORE}"
+  fi
+  # did we get a file?
+  if [[ -f "$TMPRESTORE" ]]; then
+    gunzip < $TMPRESTORE | mysql -h $DB_SERVER -P $DB_PORT $DBUSER $DBPASS
+    /bin/rm -f $TMPRESTORE
+  else
+    echo "Could not find restore file $DB_RESTORE_TARGET"
+    exit 1
+  fi
+  # Execute additional scripts for post backup restore processing. For example,
+  # uncompress a tarball that contains the files of a wordpress installation
+  if [ -d /scripts.d/post-restore/ ]; then
+    for i in $(ls /scripts.d/post-restore/*.sh); do
+      if [ -x $i ]; then
+        DB_RESTORE_TARGET=${DB_RESTORE_TARGET} DB_DUMP_DEBUG=${DB_DUMP_DEBUG} $i
+      fi
+    done
+  fi
+else
+  # determine target proto
+  uri_parser ${DB_DUMP_TARGET}
+
+  # wait for the next time to start a backup
+  # for debugging
+  echo Starting at $(date)
+  current_time=$(date +"%s")
+  freq_time=$(($DB_DUMP_FREQ*60))
+  # get the begin time on our date
+  # REMEMBER: we are using the basic date package in alpine
+  today=$(date +"%Y%m%d")
+  # could be a delay in minutes or an absolute time of day
+  if [[ $DB_DUMP_BEGIN =~ ^\+(.*)$ ]]; then
+    waittime=$(( ${BASH_REMATCH[1]} * 60 ))
+    target_time=$(($current_time + $waittime))
+  else
+    target_time=$(date --date="${today}${DB_DUMP_BEGIN}" +"%s")
+
+    if [[ "$target_time" < "$current_time" ]]; then
+      target_time=$(($target_time + 24*60*60))
+    fi
+
+    waittime=$(($target_time - $current_time))
+  fi
+
+  # If RUN_ONCE is set, don't wait
+  if [ -z "${RUN_ONCE}" ]; then
+    sleep $waittime
+  fi
+
+  # enter the loop
+  while true; do
+    # make sure the directory exists
+    mkdir -p $TMPDIR
+    # Execute additional scripts for pre processing. For example, uncompress a
+    # backup file containing this db backup and a second tar file with the
+    # contents of a wordpress install so they can be restored.
+    if [ -d /scripts.d/pre-backup/ ]; then
+      for i in $(ls /scripts.d/pre-backup/*.sh); do
+        if [ -x $i ]; then
+          NOW=${now} DUMPFILE=${TMPDIR}/${TARGET} DUMPDIR=${uri[path]} DB_DUMP_DEBUG=${DB_DUMP_DEBUG} $i
+        fi
+      done
+    fi
+
+    # what is the name of our target?
+    now=$(date -u +"%Y%m%d%H%M%S")
+    TARGET=db_backup_${now}.gz
+    if [[ -n "$DB_NAMES" ]]; then
+      DB_LIST="--databases $DB_NAMES"
+    else
+      DB_LIST="-A"
+    fi
+
+    # make the dump
+    mysqldump -h $DB_SERVER -P $DB_PORT $DBUSER $DBPASS $DB_LIST $DUMPVARS | gzip > ${TMPDIR}/${TARGET}
+
+    # Execute additional scripts for post processing. For example, create a new
+    # backup file containing this db backup and a second tar file with the
+    # contents of a wordpress install.
+    if [ -d /scripts.d/post-backup/ ]; then
+      for i in $(ls /scripts.d/post-backup/*.sh); do
+        if [ -x $i ]; then
+          NOW=${now} DUMPFILE=${TMPDIR}/${TARGET} DUMPDIR=${uri[path]} DB_DUMP_DEBUG=${DB_DUMP_DEBUG} $i
+        fi
+      done
+    fi
+
+    # what kind of target do we have? Plain filesystem? smb?
+    case "${uri[schema]}" in
+      "file")
+        mkdir -p ${uri[path]}
+        mv ${TMPDIR}/${TARGET} ${uri[path]}/${TARGET}
+        ;;
+      "s3")
+        # allow for endpoint url override
+        [[ -n "$AWS_ENDPOINT_URL" ]] && AWS_ENDPOINT_OPT="--endpoint-url $AWS_ENDPOINT_URL"
+        aws ${AWS_ENDPOINT_OPT} s3 cp ${TMPDIR}/${TARGET} "${DB_DUMP_TARGET}/${TARGET}"
+        /bin/rm ${TMPDIR}/${TARGET}
+        ;;
+      "smb")
+        if [[ -n "$SMB_USER" ]]; then
+          UPASSARG="-U"
+          UPASS="${SMB_USER}%${SMB_PASS}"
+        elif [[ -n "${uri[user]}" ]]; then
+          UPASSARG="-U"
+          UPASS="${uri[user]}%${uri[password]}"
+        else
+          UPASSARG=
+          UPASS=
+        fi
+        if [[ -n "${uri[userdomain]}" ]]; then
+          UDOM="-W ${uri[userdomain]}"
+        else
+          UDOM=
+        fi
+
+        smbclient -N "//${uri[host]}/${uri[share]}" ${UPASSARG} "${UPASS}" ${UDOM} -c "cd ${uri[sharepath]}; put ${TMPDIR}/${TARGET} ${TARGET}"
+        /bin/rm ${TMPDIR}/${TARGET}
+       ;;
+    esac
+
+    # wait, unless RUN_ONCE is set
+    if [ -z "${RUN_ONCE}" ]; then
+      current_time=$(date +"%s")
+      # Calculate how long the previous backup took
+      backup_time=$(($current_time - $target_time))
+      # Calculate how many times the frequency time was passed during the previous backup.
+      freq_time_count=$(($backup_time / $freq_time))
+      # Increment the count with one because we want to wait at least the frequency time once.
+      freq_time_count_to_add=$(($freq_time_count + 1))
+      # Calculate the extra time to add to the previous target time
+      extra_time=$(($freq_time_count_to_add*$freq_time))
+      # Calculate the new target time needed for the next calculation
+      target_time=$(($target_time + $extra_time))
+      # Calculate the wait time
+      waittime=$(($target_time - $current_time))
+      sleep $waittime
+    else
+      exit 0
+    fi
+  done
+fi
